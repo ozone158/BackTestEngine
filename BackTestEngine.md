@@ -9,6 +9,10 @@
   - `python -m src.data.storage.schema` (uses `DATABASE_URL` or default SQLite)
   - Or: `from src.data.storage import get_engine, create_schema; create_schema(get_engine())`
 
+## Reference tables first (Step 1.1.2)
+
+Reference tables are: `symbols`, `corporate_actions`, `pair_universe`. They are created first (dependency order). Use `create_reference_tables(engine)` to create only these (e.g. incremental setup). Application logic for `symbol_a < symbol_b`: use `normalize_pair(symbol_a, symbol_b)` → `(a, b)` and `pair_id(symbol_a, symbol_b)` → `"{a}_{b}"` from `src.data.storage.reference` before inserting into `pair_universe`.
+
 ## Alpha summary tables (Step 1.1.3)
 
 Tables: `cointegration_results`, `kalman_params`, `ou_params`. Use `create_alpha_tables(engine)` to create only these (after reference tables). Group: `ALPHA_TABLES`.
@@ -65,12 +69,31 @@ Conventions: timestamps UTC; symbol_id uppercase; pair_id = symbol_a_symbol_b wi
 
 ## Data ingestion (Step 1.4)
 
-- **DataSource (abstract):** `fetch(symbol, start, end)` → DataFrame with symbol, datetime, open, high, low, close, volume (UTC). Implementations share this contract.
-- **Alpha Vantage (chosen API):** `AlphaVantageDataSource(api_key=...)` or set `ALPHA_VANTAGE_API_KEY`. Uses TIME_SERIES_DAILY. Rate limits: 5 calls/min (free tier), 500/day; throttling and retries on 429/5xx. Raw schema: date, 1. open–5. volume; normalized to UTC.
-- **CSV interface:** `CSVDataSource(csv_path=...)` or `CSVDataSource(csv_dir=..., filename_pattern="{symbol}.csv")`. Optional `column_map` (normalized name → CSV header); else inferred from common aliases (Date, Open, Close, etc.). Same `fetch(symbol, start, end)` contract.
-- **Symbol registration:** `register_symbol(engine, symbol_id, display_name=..., asset_class=..., exchange=..., currency=...)` — insert if not exists.
-- **Pipeline:** `ingest_bars(data_source, symbols, start, end, root_path, source_name, engine=..., preprocess=True)` — fetch → register symbols → preprocess → write_bars per partition.
-- **Script:** `PYTHONPATH=. python -m scripts.ingest_alpha_vantage --symbols AAPL MSFT --days 10` (set `ALPHA_VANTAGE_API_KEY`).
+- **DataSource (abstract):** `src/data/ingestion/base.py` — contract `fetch(symbol, start, end)` → DataFrame with columns `symbol`, `datetime` (UTC), `open`, `high`, `low`, `close`, `volume`. `normalize_bars_df()` for flexible column mapping.
+- **Alpha Vantage (1.4.1–1.4.4):** `AlphaVantageDataSource` — TIME_SERIES_DAILY; raw schema: date → "1. open", "2. high", "3. low", "4. close", "5. volume". Rate limits (free tier): 5 requests/minute, 25/day; throttle 12s between requests; retries on 429/5xx. API key: `ALPHA_VANTAGE_API_KEY` or `apikey=` in constructor.
+- **CSV interface:** `CSVDataSource(file_path=...)` or `CSVDataSource(base_path=..., pattern="{symbol}.csv")` — reads CSV with flexible column names (symbol, date/datetime, open/O, high/H, low/L, close/C, volume/V); normalizes to same schema and UTC.
+- **Symbol registration (1.4.3):** `register_symbol(engine, symbol_id, display_name=..., asset_class=..., exchange=..., currency=...)` — insert if not exists.
+- **Integration (1.4.5):** `scripts/ingest_alpha_vantage.py` — fetch symbols from Alpha Vantage → preprocess → write to Parquet (partition source=alpha_vantage); register symbols in DB. Usage: `ALPHA_VANTAGE_API_KEY=key python -m scripts.ingest_alpha_vantage --symbols AAPL MSFT --days 30 --root data`.
+
+## End-to-end validation (Step 1.5)
+
+- **Validation script (1.5.1):** `scripts/validate_e2e.py` — (1) Optionally ingest 2–3 symbols over 5–10 days (same flow as ingest_alpha_vantage). (2) Read back bars with `read_bars(root, symbols, start, end, source=...)`. (3) Run sanity checks and cross-check.
+- **Sanity checks (1.5.2):** `src/data/validation.py` — `run_sanity_checks(df, start, end)` asserts: no duplicate (symbol, datetime); datetime strictly increasing per symbol; all bar datetimes in [start, end]; adj_factor present and > 0; OHLC non-negative. Returns list of error messages (empty if pass).
+- **Cross-check (1.5.3):** `run_cross_check(df, sample_per_symbol=...)` spot-checks a sample of bars (high ≥ low, adj_factor > 0).
+- **Documentation (1.5.4):** `scripts/README.md` — how to run validation, options, expected output. Run: `python -m scripts.validate_e2e --symbols AAPL MSFT --days 7 --root data` (or `--skip-ingest` to validate existing data only).
+
+## Cointegration pipeline (Step 2.1)
+
+- **Input data (2.1.1):** `load_pair_bars(root_path, symbol_a, symbol_b, start, end, source=..., min_obs=60)` — reads bars via `read_bars`, aligns on datetime (inner join), drops missing close; returns `(aligned_df, test_ts)` or `(None, None)` if insufficient observations. `aligned_df` has columns `datetime`, `close_a`, `close_b`.
+- **ADF (2.1.2):** Spread formed as `close_a - beta*close_b` with OLS beta over the window; `statsmodels.tsa.stattools.adfuller` with `autolag='AIC'`. Records `adf_statistic`, `adf_pvalue`.
+- **Johansen (2.1.3):** `statsmodels.tsa.vector_ar.vecm.coint_johansen` on `(close_a, close_b)`; trace statistic and approximate p-value from critical values; cointegrating vector normalized as `[1, -beta]` (JSON).
+- **Decision (2.1.4):** `is_cointegrated = (adf_pvalue < adf_threshold) and (johansen_pvalue < johansen_threshold)`; defaults 0.05 each; configurable via `run_cointegration_test(..., adf_pvalue_threshold=..., johansen_pvalue_threshold=...)`.
+- **Persist (2.1.5):** `persist_cointegration_result(result, engine, replace_existing=True)` — insert into `cointegration_results`; replaces existing `(pair_id, test_ts)` when `replace_existing` is True.
+- **Single pair:** `run_pair_cointegration(root_path, symbol_a, symbol_b, start, end, engine=..., source=...)` — load, test, optionally persist; returns `CointegrationResult` or `None` if insufficient data.
+- **Batch (2.1.6):** `run_batch_cointegration(root_path, engine, start, end, source=..., pair_ids=...)` — for each pair in `pair_universe` (or in `pair_ids`), runs `run_pair_cointegration` and returns list of results. Only pairs with sufficient bar data are included.
+- **Tests (2.1.7):** `tests/test_cointegration.py` — synthetic cointegrated series (y = x + noise, both I(1)) → `is_cointegrated` true; synthetic non-cointegrated (two independent random walks) → false; persist round-trip; `load_pair_bars` returns None for insufficient data.
+
+**Acceptance:** CointegrationTest produces ADF and Johansen outputs; pipeline writes `cointegration_results`; only cointegrated pairs (by decision rule) proceed to Kalman/OU.
 
 ## Migrations
 
