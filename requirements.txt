@@ -1,0 +1,14 @@
+# Data & storage (Phase 1)
+sqlalchemy>=2.0,<3
+# PostgreSQL driver (optional; only needed when using postgresql:// URLs)
+# psycopg2-binary>=2.9
+
+# For Parquet (Step 1.2+)
+# pyarrow>=14.0
+
+# Ingestion (Step 1.4) — Alpha Vantage
+requests>=2.28
+
+# Testing
+pytest>=7.0
+pytest-asyncio>=0.21
