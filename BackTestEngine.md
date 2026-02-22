@@ -51,7 +51,7 @@ Conventions: timestamps UTC; symbol_id uppercase; pair_id = symbol_a_symbol_b wi
 
 ## Parquet bars (Step 1.2)
 
-- **Bar schema (1.2.1):** `src/data/storage/parquet_bars.py` — `BAR_SCHEMA` (PyArrow): symbol (string), datetime (timestamp[us], UTC), open, high, low, close, volume (float64), adj_factor (float64, default 1.0), outlier_flag (int8). Bar datetime = bar open time; all UTC.
+- **Bar schema (1.2.1):** `src/data/storage/parquet_bars.py` — Bar schema uses **Polars** (`pl.Schema`): symbol (Utf8), datetime (Datetime("us", "UTC")), open/high/low/close/volume (Float64), adj_factor (Float64, default 1.0), outlier_flag (Int8). Bar datetime = bar open time; all UTC. `write_bars` accepts Polars or pandas DataFrame; `read_bars` returns `pl.DataFrame`.
 - **Partition key (1.2.2):** `(source, date)` → `root_path/bars/source={source}/date=YYYY-MM-DD/`. Date format YYYY-MM-DD.
 - **Write:** `write_bars(root_path, partition_key, df)` — validates (symbol, datetime) unique and ascending per symbol; rejects appending older bars after newer.
 - **Read:** `read_bars(root_path, symbols, start, end, source=None, columns=None)` — predicate pushdown by partition and filters; returns sorted (symbol, datetime). Optional column subset.
@@ -78,13 +78,13 @@ Conventions: timestamps UTC; symbol_id uppercase; pair_id = symbol_a_symbol_b wi
 ## End-to-end validation (Step 1.5)
 
 - **Validation script (1.5.1):** `scripts/validate_e2e.py` — (1) Optionally ingest 2–3 symbols over 5–10 days (same flow as ingest_alpha_vantage). (2) Read back bars with `read_bars(root, symbols, start, end, source=...)`. (3) Run sanity checks and cross-check.
-- **Sanity checks (1.5.2):** `src/data/validation.py` — `run_sanity_checks(df, start, end)` asserts: no duplicate (symbol, datetime); datetime strictly increasing per symbol; all bar datetimes in [start, end]; adj_factor present and > 0; OHLC non-negative. Returns list of error messages (empty if pass).
+- **Sanity checks (1.5.2):** `src/data/validation.py` — `run_sanity_checks(df, start, end)` accepts Polars or pandas DataFrame. Asserts: no duplicate (symbol, datetime); datetime strictly increasing per symbol; bars in [start, end]; adj_factor > 0; OHLC non-negative. Returns list of error messages (empty if pass).
 - **Cross-check (1.5.3):** `run_cross_check(df, sample_per_symbol=...)` spot-checks a sample of bars (high ≥ low, adj_factor > 0).
 - **Documentation (1.5.4):** `scripts/README.md` — how to run validation, options, expected output. Run: `python -m scripts.validate_e2e --symbols AAPL MSFT --days 7 --root data` (or `--skip-ingest` to validate existing data only).
 
 ## Cointegration pipeline (Step 2.1)
 
-- **Input data (2.1.1):** `load_pair_bars(root_path, symbol_a, symbol_b, start, end, source=..., min_obs=60)` — reads bars via `read_bars`, aligns on datetime (inner join), drops missing close; returns `(aligned_df, test_ts)` or `(None, None)` if insufficient observations. `aligned_df` has columns `datetime`, `close_a`, `close_b`.
+- **Input data (2.1.1):** `load_pair_bars(root_path, symbol_a, symbol_b, start, end, source=..., min_obs=60)` — reads bars via `read_bars` (Polars), pivots and aligns on datetime; returns `(aligned_pl.DataFrame, test_ts)` or `(None, None)` if insufficient observations. `aligned_df` has columns `datetime`, `close_a`, `close_b`.
 - **ADF (2.1.2):** Spread formed as `close_a - beta*close_b` with OLS beta over the window; `statsmodels.tsa.stattools.adfuller` with `autolag='AIC'`. Records `adf_statistic`, `adf_pvalue`.
 - **Johansen (2.1.3):** `statsmodels.tsa.vector_ar.vecm.coint_johansen` on `(close_a, close_b)`; trace statistic and approximate p-value from critical values; cointegrating vector normalized as `[1, -beta]` (JSON).
 - **Decision (2.1.4):** `is_cointegrated = (adf_pvalue < adf_threshold) and (johansen_pvalue < johansen_threshold)`; defaults 0.05 each; configurable via `run_cointegration_test(..., adf_pvalue_threshold=..., johansen_pvalue_threshold=...)`.
@@ -94,6 +94,32 @@ Conventions: timestamps UTC; symbol_id uppercase; pair_id = symbol_a_symbol_b wi
 - **Tests (2.1.7):** `tests/test_cointegration.py` — synthetic cointegrated series (y = x + noise, both I(1)) → `is_cointegrated` true; synthetic non-cointegrated (two independent random walks) → false; persist round-trip; `load_pair_bars` returns None for insufficient data.
 
 **Acceptance:** CointegrationTest produces ADF and Johansen outputs; pipeline writes `cointegration_results`; only cointegrated pairs (by decision rule) proceed to Kalman/OU.
+
+## Kalman filter Python (Step 2.2)
+
+- **State-space (2.2.1):** State x = β (hedge ratio). Transition: β random walk (F=1, process noise Q). Observation: z = price_a with H = price_b (so z_pred = β*price_b); measurement noise R. Implemented in `src/data/alpha/kalman.py` — `KalmanHedgeRatio(process_noise, measurement_noise, initial_state=None)`.
+- **Initialization (2.2.2):** OLS β over warm-up window (default 20 bars) for initial state and P0; or load from `kalman_params` via `load_kalman_params(engine, pair_id, window_end_before_or_equal=...)` → `(KalmanState, Q, R)`.
+- **Recursive update (2.2.3):** `KalmanHedgeRatio.update(price_a, price_b)` → (β, spread). Predict then update; spread = price_a - β*price_b after update. No use of future prices.
+- **Z-score (2.2.4):** Expanding mean/std of spread using only past data; appended as `z_score` in output (optional).
+- **Output series (2.2.5):** `run_kalman_on_aligned(aligned_df, ...)` → `(pl.DataFrame, final_state)`. Accepts Polars or pandas aligned_df; returns Polars DataFrame with `datetime`, `spread`, `beta`, `z_score`; optional `kalman_state` for debug.
+- **Write to Parquet (2.2.6):** `src/data/storage/parquet_spreads.py` — **Polars**: schema `pair_id`, `datetime` (UTC), `spread`, `beta`, `z_score`, `kalman_state`. Partition: `root_path/alpha/spreads/pair_id={pair_id}/`. `write_spreads` / `read_spreads` accept and return `pl.DataFrame` (pandas accepted for write).
+- **Persist Kalman params (2.2.7):** `persist_kalman_params(pair_id, window_start, window_end, state, process_noise, measurement_noise, engine)` — insert into `kalman_params` for warm start.
+- **Single pair pipeline:** `run_pair_kalman(root_path, symbol_a, symbol_b, start, end, engine=..., write_parquet=True, persist_params=False, min_obs=60)` — uses `load_pair_bars`, runs filter, optionally writes Parquet and persists params; returns spread DataFrame or None.
+- **Tests (2.2.8):** `tests/test_kalman.py` — output length equals input length; no NaNs after warm-up; β converges toward OLS reference; `KalmanHedgeRatio.update` recursive; persist/load `kalman_params` round-trip; `run_pair_kalman` with bars on disk writes Parquet and returns DataFrame.
+
+**Acceptance:** KalmanHedgeRatio.update() produces β and spread recursively; spread series written to Parquet; optional kalman_params persistence; no look-ahead.
+
+## OU process and thresholds (Step 2.3)
+
+- **Input (2.3.1):** Spread series (from Kalman or Parquet) over estimation window; require sufficient length (e.g. 60+). Pass 1d array or `df["spread"]` to `fit_ou` / `OUModel.fit`.
+- **OU estimation (2.3.2):** Ornstein-Uhlenbeck dX = θ(μ - X)dt + σ dW. Discrete AR(1): X_t = μ + φ(X_{t-1} - μ) + ε_t, φ = exp(-θ). Moment matching: μ = mean(X), φ = lag-1 autocorrelation, θ = -ln(φ), σ = sqrt(2θ·Var(X)). Edge case: θ ≤ 0 (non-mean-reverting) → theta/sigma set 0; caller can reject/flag. Implemented in `src/data/alpha/ou.py` — `_fit_ou_moment_matching`, `fit_ou(spread_series, entry_k=..., exit_threshold_spread=...)`.
+- **Entry/exit thresholds (2.3.3):** In spread units: entry_upper = μ + k·σ, entry_lower = μ - k·σ (k configurable, default 2); exit_threshold = μ (or override). `fit_ou(..., entry_k=2.0)` returns `OUParams` with these fields.
+- **OUModel API (2.3.4):** `OUModel(entry_k=..., exit_threshold_spread=...)`; `fit(spread_series)` → store theta, mu, sigma and compute thresholds; `entry_exit_thresholds()` → (entry_upper, entry_lower, exit_threshold).
+- **Persist (2.3.5):** `persist_ou_params(pair_id, params, engine)` — insert into `ou_params`. `load_ou_params(engine, pair_id, window_end_before_or_equal=...)` — load latest. Optional Parquet: `write_ou_params_parquet(root_path, pair_id, params)` → `data/alpha/ou/pair_id={pair_id}/params.parquet`. `run_pair_ou(spread_series, pair_id, window_start=..., window_end=..., engine=..., root_path=..., persist=..., write_parquet=...)` — fit, optionally persist and write Parquet.
+- **Signal spec (2.3.6):** Enter long_spread when spread > entry_upper; enter short_spread when spread < entry_lower; exit (flat) when spread returns to exit_threshold (mean μ). Strategy will implement this logic.
+- **Tests (2.3.7):** `tests/test_ou.py` — synthetic OU series (known θ, μ, σ), fit close to true; threshold computation; OUModel API; persist/load round-trip; run_pair_ou with persist and Parquet.
+
+**Acceptance:** OUModel fit returns θ, μ, σ and thresholds; ou_params (and optional Parquet) written; signal spec documented for Strategy.
 
 ## Migrations
 

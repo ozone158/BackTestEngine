@@ -16,16 +16,22 @@ This document is the **implementation roadmap** for the BackTestEngine: a step-b
 
 | Layer | Technology | Purpose |
 |-------|------------|--------|
-| **Language** | Python 3.10+ (3.11+ preferred); C++17 | Main logic; hot-path acceleration |
-| **Data I/O** | `pyarrow` | Parquet read/write, partitioning |
+| **Language** | Python 3.11+ (3.12 for new code); C++17 | Main logic; hot-path acceleration; use type hints throughout |
+| **Data I/O** | `polars` | Parquet read/write, partitioning, lazy scans; primary columnar API |
 | **Alternative columnar** | `tables` or `h5py` | HDF5 if needed |
 | **Relational DB** | SQLite (default) or PostgreSQL | Metadata, runs, signals, fills, metrics |
+| **Analytical SQL (optional)** | `duckdb` | SQL directly on Parquet for ad-hoc queries and reporting (zero-copy) |
 | **Numerics** | `numpy`, `scipy` | ADF, linear algebra, OU fitting |
 | **Stats / econometrics** | `statsmodels` | Johansen, OLS, unit-root helpers |
-| **Async / APIs** | `aiohttp`, `websockets` | REST/WebSocket ingestion |
+| **Async / APIs** | `httpx` or `aiohttp`, `websockets` | REST (httpx preferred) and WebSocket ingestion |
 | **C++ bindings** | `pybind11` | Expose Kalman, order-matching to Python |
-| **Config & validation** | `pydantic` + YAML/JSON | Strategy config, fees, slippage, env |
-| **Testing** | `pytest`, `pytest-asyncio` | Unit and integration tests |
+| **Config & validation** | `pydantic` (v2) + YAML/JSON | Strategy config, fees, slippage; use Pydantic v2 for speed and validation |
+| **Testing** | `pytest`, `pytest-asyncio`, optional `pytest-cov` | Unit and integration tests; coverage for CI |
+| **Tooling** | `ruff`, `pyproject.toml` | Lint/format with Ruff; single source for build/metadata (PEP 517) |
+
+**Data I/O note:** Polars is the primary columnar API: native Parquet I/O, lazy evaluation (`scan_parquet`) for large datasets, strong predicate pushdown and column pruning, and a single DataFrame type for the pipeline (no pandas/pyarrow conversion). Use Polars throughout Module 1–2 for bars, spreads, and alpha outputs.
+
+**Conventions:** Use **type hints** on all public APIs and modules (e.g. `str | None`, `list[Bar]`). Prefer **pyproject.toml** for project metadata, dependencies, and tool config (Ruff, pytest); use **.env** (e.g. `python-dotenv`) for local secrets and overrides, not config files.
 
 ---
 
@@ -86,10 +92,10 @@ This document is the **implementation roadmap** for the BackTestEngine: a step-b
 
 | Sub-step | Action | Elaboration |
 |----------|--------|-------------|
-| 1.2.1 | Define bar schema in code | Formalize bar schema: symbol (string), datetime (timestamp[us] UTC), open, high, low, close, volume (float64), adj_factor (float64, default 1.0), outlier_flag (int8, optional). Use PyArrow schema so writer and reader agree. |
+| 1.2.1 | Define bar schema in code | Formalize bar schema: symbol (string), datetime (timestamp[us] UTC), open, high, low, close, volume (float64), adj_factor (float64, default 1.0), outlier_flag (int8, optional). Use Polars dtypes/schema so writer and reader agree. |
 | 1.2.2 | Define partition key structure | Partition key = (source, date). Example: `data/bars/source=csv/date=2024-01-15/`. Directory layout must allow listing by source and date for range reads. Document partition naming (e.g. date=YYYY-MM-DD). |
-| 1.2.3 | Implement write path | Write function: input = (partition_key dict, DataFrame with bar columns). Convert DataFrame to PyArrow Table; validate (symbol, datetime) unique and datetime ascending per symbol within the batch; write to partition directory as one or more Parquet files. Reject writes that would break ordering (e.g. appending older bars after newer). |
-| 1.2.4 | Implement read path | Read function: input = (symbols list, start datetime, end datetime, optional source). List partition directories in date range; read only relevant Parquet files; filter by symbol and datetime range (predicate pushdown); return single combined DataFrame sorted by (symbol, datetime). Support reading only a subset of columns (e.g. symbol, datetime, close) for alpha/backtest. |
+| 1.2.3 | Implement write path | Write function: input = (partition_key dict, Polars DataFrame with bar columns). Validate (symbol, datetime) unique and datetime ascending per symbol within the batch; write to partition directory as one or more Parquet files via Polars. Reject writes that would break ordering (e.g. appending older bars after newer). |
+| 1.2.4 | Implement read path | Read function: input = (symbols list, start datetime, end datetime, optional source). Use Polars `scan_parquet` (lazy) or `read_parquet`; list partition directories in date range; read only relevant Parquet files; filter by symbol and datetime range (predicate pushdown); return single combined DataFrame sorted by (symbol, datetime). Support column subset (e.g. symbol, datetime, close) for alpha/backtest. |
 | 1.2.5 | Edge cases | Handle empty range (return empty DataFrame). Handle missing partitions (clear error or empty result per policy). Ensure timezone: all datetimes in UTC; document that bar datetime = bar open time. |
 | 1.2.6 | Tests | Unit test: write a few bars for one symbol, read back, assert equality and order. Test multi-symbol, multi-partition read. Test that reading with end &lt; min(datetime) returns empty. |
 
@@ -512,7 +518,7 @@ BackTestEngine/
 ├── ROADMAP.md                 # This document
 ├── README.md
 ├── requirements.txt
-├── pyproject.toml             # Optional
+├── pyproject.toml             # Build & metadata (PEP 517); Ruff, pytest config
 ├── src/
 │   ├── data/                  # Module 1
 │   │   ├── ingestion/         # DataSource implementations, REST/WS

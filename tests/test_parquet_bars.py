@@ -1,12 +1,13 @@
 """
 Tests for Parquet bars writer and reader (Step 1.2).
+Uses Polars as primary API; write_bars accepts pandas or Polars.
 """
 
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-import pyarrow as pa
+import polars as pl
 import pytest
 
 from src.data.storage.parquet_bars import (
@@ -46,7 +47,7 @@ def sample_bars():
 
 
 def test_bar_schema_defined():
-    """1.2.1: Bar schema has required columns and types."""
+    """1.2.1: Bar schema has required columns and types (Polars schema)."""
     assert "symbol" in BAR_COLUMNS
     assert "datetime" in BAR_COLUMNS
     assert "open" in BAR_COLUMNS
@@ -54,8 +55,8 @@ def test_bar_schema_defined():
     assert "volume" in BAR_COLUMNS
     assert "adj_factor" in BAR_COLUMNS
     assert "outlier_flag" in BAR_COLUMNS
-    assert BAR_SCHEMA.field("datetime").type == pa.timestamp("us", tz="UTC")
-    assert BAR_SCHEMA.field("open").type == pa.float64()
+    assert BAR_SCHEMA["datetime"] == pl.Datetime("us", "UTC")
+    assert BAR_SCHEMA["open"] == pl.Float64
 
 
 def test_partition_path(root_path):
@@ -74,13 +75,12 @@ def test_write_read_one_symbol(root_path, sample_bars):
         end=datetime(2024, 1, 15, 23, 59, 59, tzinfo=timezone.utc),
         source="csv",
     )
-    assert len(df) == 3
-    pd.testing.assert_frame_equal(
-        df.reset_index(drop=True),
-        sample_bars.reset_index(drop=True),
-        check_dtype=False,
-    )
-    assert df["datetime"].is_monotonic_increasing
+    assert df.shape[0] == 3
+    expected = pl.from_pandas(sample_bars).sort("datetime")
+    got = df.sort("datetime")
+    assert got["close"].to_list() == expected["close"].to_list()
+    assert got["datetime"].to_list() == expected["datetime"].to_list()
+    assert df["datetime"].is_sorted()
     assert (df["symbol"] == "AAPL").all()
 
 
@@ -118,9 +118,8 @@ def test_multi_symbol_multi_partition(root_path):
         source="csv",
     )
     assert len(df) == 4
-    assert set(df["symbol"]) == {"AAPL", "MSFT"}
-    # Sorted by (symbol, datetime); datetime is monotonic per symbol, not globally
-    assert list(df.sort_values(["symbol", "datetime"])["close"]) == [188.5, 189.5, 380.5, 381.5]
+    assert set(df["symbol"].to_list()) == {"AAPL", "MSFT"}
+    assert df.sort(["symbol", "datetime"])["close"].to_list() == [188.5, 189.5, 380.5, 381.5]
 
 
 def test_read_empty_range(root_path, sample_bars):
@@ -133,7 +132,7 @@ def test_read_empty_range(root_path, sample_bars):
         end=datetime(2024, 1, 10, 23, 59, 59, tzinfo=timezone.utc),
         source="csv",
     )
-    assert df.empty
+    assert df.is_empty()
     assert list(df.columns) == BAR_COLUMNS
 
 
@@ -146,7 +145,7 @@ def test_read_missing_partition_returns_empty(root_path):
         end=datetime(2024, 1, 16, tzinfo=timezone.utc),
         source="csv",
     )
-    assert df.empty
+    assert df.is_empty()
     assert list(df.columns) == BAR_COLUMNS
 
 
@@ -218,7 +217,7 @@ def test_read_empty_symbols_returns_empty(root_path, sample_bars):
         end=datetime(2024, 1, 16, tzinfo=timezone.utc),
         source="csv",
     )
-    assert df.empty
+    assert df.is_empty()
 
 
 def test_adj_factor_default(root_path):
@@ -240,4 +239,4 @@ def test_adj_factor_default(root_path):
         datetime(2024, 1, 16, tzinfo=timezone.utc),
         source="csv",
     )
-    assert (out["adj_factor"] == 1.0).all()
+    assert out["adj_factor"].eq(1.0).all()

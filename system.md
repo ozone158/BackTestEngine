@@ -140,7 +140,7 @@ BackTestEngine/
 ├── system.md                 # This document
 ├── README.md
 ├── requirements.txt
-├── pyproject.toml            # Optional: modern Python packaging
+├── pyproject.toml            # Build & metadata (PEP 517); tool config (Ruff, pytest)
 │
 ├── src/
 │   ├── data/                 # Module 1
@@ -178,13 +178,15 @@ BackTestEngine/
 
 | Layer | Options |
 |-------|--------|
-| Language | Python 3.10+ (or 3.11+); C++17 for hot path |
-| Data I/O | `pyarrow` (Parquet), `tables` or `h5py` (HDF5) |
+| Language | Python 3.11+ (3.12 for new code); C++17 for hot path; type hints throughout |
+| Data I/O | `polars` (Parquet, columnar DataFrames; lazy `scan_parquet` for scale), `tables` or `h5py` (HDF5) |
+| Analytical SQL (optional) | `duckdb` — SQL on Parquet for ad-hoc queries and reporting |
 | Numerics | `numpy`, `scipy` (ADF, linear algebra), `statsmodels` (Johansen, OLS) |
-| Async / APIs | `aiohttp`, `websockets` for ingestion |
+| Async / APIs | `httpx` (REST, preferred) or `aiohttp`, `websockets` for ingestion |
 | C++ bindings | `pybind11` |
-| Config | `pydantic` + YAML/JSON |
-| Testing | `pytest`, `pytest-asyncio` |
+| Config | `pydantic` (v2) + YAML/JSON; `.env` for local secrets (e.g. `python-dotenv`) |
+| Testing | `pytest`, `pytest-asyncio`; optional `pytest-cov` for coverage |
+| Tooling | `ruff` (lint/format), `pyproject.toml` for single source of build and tool config |
 
 ---
 

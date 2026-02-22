@@ -19,7 +19,7 @@ All timestamps are stored in **UTC** with microsecond precision unless noted. Sy
 | **Metadata & runs** | SQLite (default) or PostgreSQL | Symbols, pairs, corporate actions, backtest configs, run IDs | `symbols`, `backtest_runs`, `cointegration_pairs` |
 | **Config / small ref** | JSON/YAML files | Slippage schedules, fee tables, strategy params | `config/` (version-controlled) |
 
-**Rule of thumb:** If it’s a long time series keyed by (symbol, datetime) or (pair_id, datetime), use Parquet/HDF5. If it’s relational (run → signals → fills) or small reference data, use the relational DB.
+**Rule of thumb:** If it’s a long time series keyed by (symbol, datetime) or (pair_id, datetime), use Parquet/HDF5. If it’s relational (run → signals → fills) or small reference data, use the relational DB. **Columnar API:** Use **Polars** for all Parquet read/write and time-series DataFrames (bars, ticks, spreads); use `scan_parquet` for lazy, predicate-pushdown reads at scale. For ad-hoc SQL over Parquet (e.g. reporting, one-off analytics), **DuckDB** is a popular option (zero-copy, no ETL).
 
 ---
 
@@ -248,6 +248,8 @@ All timestamps are stored in **UTC** with microsecond precision unless noted. Sy
 
 ## 5. Columnar Schema (Parquet / HDF5)
 
+All Parquet read/write and time-series DataFrames use **Polars** (dtypes, `read_parquet` / `write_parquet`, `scan_parquet` for lazy reads). Schemas below define column names and types for writer/reader agreement.
+
 ### 5.1 Bars (OHLCV)
 
 **Path pattern (Parquet):** `data/bars/{source}/{year}/{month}/` or `data/bars/source={source}/date={YYYY-MM-DD}/`
@@ -359,9 +361,10 @@ Can duplicate or replace relational `ou_params` for bulk research; keep one sour
 
 ## 7. Partitioning, Indexing & Performance
 
-### 7.1 Parquet
+### 7.1 Parquet (Polars)
 
-- **Bars:** Partition by `source` and `date` (or year/month). Filter by `symbol` and `datetime` range; use column pruning (only read `close`, `volume` if that’s all that’s needed).
+- **API:** Use Polars for all Parquet I/O. `pl.scan_parquet()` with predicate pushdown and `select()` for column pruning; `collect()` only when materialization is needed.
+- **Bars:** Partition by `source` and `date` (or year/month). Filter by `symbol` and `datetime` range; use Polars column selection (e.g. only `close`, `volume`) to minimize read size.
 - **Ticks:** Partition by date; optional symbol in partition if very high cardinality.
 - **Spreads/alpha:** Partition by `pair_id` or by date; keep `pair_id` and `datetime` for range scans.
 

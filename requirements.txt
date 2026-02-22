@@ -3,8 +3,8 @@ sqlalchemy>=2.0,<3
 # PostgreSQL driver (optional; only needed when using postgresql:// URLs)
 # psycopg2-binary>=2.9
 
-# Parquet bars (Step 1.2)
-pyarrow>=14.0
+# Parquet bars & columnar (Step 1.2) — Polars as primary API
+polars>=0.20
 pandas>=2.0
 
 # Alpha research (Phase 2) — cointegration, Kalman, OU

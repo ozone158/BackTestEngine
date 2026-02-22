@@ -74,10 +74,12 @@ def main() -> int:
 
     print("Step 2: Reading back bars...")
     df = read_bars(args.root, args.symbols, start, end, source=args.source)
-    if df.empty:
+    if df.is_empty():
         print("No bars read. Run without --skip-ingest and ensure ALPHA_VANTAGE_API_KEY is set.")
         return 1
-    print(f"  Read {len(df)} bars for {df['symbol'].nunique()} symbol(s).")
+    n_bars = df.shape[0]
+    n_symbols = df["symbol"].n_unique()
+    print(f"  Read {n_bars} bars for {n_symbols} symbol(s).")
 
     print("Step 3: Sanity checks...")
     errors = run_sanity_checks(df, start, end)
