@@ -205,3 +205,78 @@ def test_flush_equity_curve_inserts_rows():
     assert len(rows) == 2
     assert rows[0][1] == 51_000.0
     assert rows[1][1] == 50_500.0
+
+
+def test_current_equity():
+    """current_equity(bar_data) returns cash + positions at bar closes."""
+    run_id = generate_run_id()
+
+    def mock_execute(symbol, side, quantity, ref_price, timestamp):
+        return FillEvent(
+            timestamp=timestamp,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=ref_price,
+            commission=0.0,
+            slippage_bps=0.0,
+        )
+
+    port = Portfolio(run_id, initial_capital=100_000.0, execution_handler=mock_execute)
+    port.start_run()
+    assert port.current_equity(None) == 100_000.0
+    bar_data = {"A": {"close": 50.0}, "B": {"close": 50.0}}
+    assert port.current_equity(bar_data) == 100_000.0
+
+    port.process_signal(
+        SignalEvent(_utc(2025, 1, 15), direction="long_spread", symbol_a="A", symbol_b="B", hedge_ratio=1.0, size=10.0),
+        bar_data,
+    )
+    # Positions: A=10, B=-10. Value at 50 each: 10*50 - 10*50 = 0; cash changed
+    equity = port.current_equity(bar_data)
+    assert equity == pytest.approx(port.cash + 10 * 50 - 10 * 50, rel=1e-9)
+
+
+def test_zero_ref_price_or_zero_size_returns_no_fills():
+    """For long_spread/short_spread, zero or negative ref price or size <= 0 yields no fills."""
+    run_id = generate_run_id()
+
+    def mock_execute(symbol, side, quantity, ref_price, timestamp):
+        return FillEvent(
+            timestamp=timestamp,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            price=ref_price,
+            commission=0.0,
+            slippage_bps=0.0,
+        )
+
+    port = Portfolio(run_id, initial_capital=100_000.0, execution_handler=mock_execute)
+    port.start_run()
+
+    # Zero price for one leg
+    signal = SignalEvent(
+        _utc(2025, 1, 15),
+        direction="long_spread",
+        symbol_a="A",
+        symbol_b="B",
+        hedge_ratio=1.0,
+        size=10.0,
+    )
+    fills = port.process_signal(signal, {"A": {"close": 0.0}, "B": {"close": 100.0}})
+    assert len(fills) == 0
+    fills = port.process_signal(signal, {"A": {"close": 100.0}, "B": {"close": 0.0}})
+    assert len(fills) == 0
+
+    # Zero size (long_spread)
+    signal_zero = SignalEvent(
+        _utc(2025, 1, 15),
+        direction="long_spread",
+        symbol_a="A",
+        symbol_b="B",
+        hedge_ratio=1.0,
+        size=0.0,
+    )
+    fills = port.process_signal(signal_zero, {"A": {"close": 100.0}, "B": {"close": 100.0}})
+    assert len(fills) == 0

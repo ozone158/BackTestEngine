@@ -31,3 +31,18 @@ include = ["src*"]
 
 # C++ extension is built via setup.py (ext_modules) when present
 # Run: pip install -e .  (builds kalman_core from cpp/kalman_filter.cpp)
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v"

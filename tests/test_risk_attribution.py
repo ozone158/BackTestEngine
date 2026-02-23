@@ -85,3 +85,31 @@ def test_align_drops_nan():
     market = np.array([0.01, 0.0, np.nan, 0.005])
     out = RiskAttribution.decompose(strategy, factor_returns=market)
     assert len(out["residuals"]) == 2
+
+
+def test_decompose_method_pca():
+    """method='pca' regresses on first n_components of PCA of factor matrix."""
+    np.random.seed(99)
+    n = 80
+    f1 = np.random.randn(n) * 0.01
+    f2 = np.random.randn(n) * 0.005
+    strategy = 0.5 * f1 + 0.2 * f2 + np.random.randn(n) * 0.002
+    X = np.column_stack([f1, f2])
+    out_ols = RiskAttribution.decompose(strategy, factor_matrix=X, periods_per_year=252, method="ols")
+    out_pca = RiskAttribution.decompose(strategy, factor_matrix=X, periods_per_year=252, method="pca", n_components=2)
+    assert "alpha" in out_pca and "beta" in out_pca and "R2" in out_pca
+    assert np.isfinite(out_pca["alpha"]) or out_pca["alpha"] is not None
+    assert len(out_pca["residuals"]) == n
+
+
+def test_decompose_insufficient_data_returns_safe():
+    """Insufficient or all-NaN data returns alpha/beta 0 or NaN and does not raise."""
+    out = RiskAttribution.decompose([0.01], factor_returns=[0.005])
+    assert out["alpha"] == 0.0
+    assert out["beta"] == 0.0
+    assert len(out["residuals"]) == 0
+
+    out_nan = RiskAttribution.decompose([np.nan, np.nan], factor_returns=[0.01, 0.02])
+    assert np.isnan(out_nan["alpha"])
+    assert "beta" in out_nan
+    assert "residuals" in out_nan

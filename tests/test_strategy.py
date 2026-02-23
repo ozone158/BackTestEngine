@@ -167,3 +167,26 @@ def test_ignores_market_event_without_both_symbols():
     ev = MarketEvent(timestamp=_utc(2025, 1, 15), symbols=("AAPL", "MSFT"), bar_data={"AAPL": {"close": 100}})
     out = strategy.process_market_event(ev)
     assert out is None
+
+
+def test_size_provider_overrides_fixed_size():
+    """When size_provider is set, signal size comes from provider (timestamp, bar_data, direction, current_equity)."""
+    ou = _ou_params(mu=0.0, sigma=1.0, entry_k=2.0)
+
+    def provider(ts, bar_data):
+        return (2.5, 1.0)
+
+    def size_provider(ts, bar_data, direction, current_equity):
+        assert direction == DIRECTION_LONG_SPREAD
+        return (current_equity or 100_000.0) * 0.1  # 10% of equity
+
+    strategy = OUStrategy("A", "B", ou, provider, size=5.0, size_provider=size_provider)
+    ev = MarketEvent(
+        timestamp=_utc(2025, 1, 15, 10, 0),
+        symbols=("A", "B"),
+        bar_data={"A": {"close": 100}, "B": {"close": 100}},
+    )
+    out = strategy.process_market_event(ev, current_equity=50_000.0)
+    assert out is not None
+    assert out.direction == DIRECTION_LONG_SPREAD
+    assert out.size == 5_000.0  # 10% of 50_000

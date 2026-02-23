@@ -130,20 +130,25 @@ class Portfolio:
         size = signal.size or 0.0
         beta = signal.hedge_ratio or 0.0
 
+        # Validate reference prices for long/short: avoid zero or negative fill prices
+        if signal.direction in (DIRECTION_LONG_SPREAD, DIRECTION_SHORT_SPREAD):
+            if price_a <= 0 or price_b <= 0:
+                return []
+            if size <= 0:
+                return []
+
         orders: List[Tuple[str, str, float]] = []  # (symbol, side, quantity)
 
         if signal.direction == DIRECTION_LONG_SPREAD:
-            if size > 0:
-                orders = [
-                    (signal.symbol_a, SIDE_BUY, size),
-                    (signal.symbol_b, SIDE_SELL, size * beta),
-                ]
+            orders = [
+                (signal.symbol_a, SIDE_BUY, size),
+                (signal.symbol_b, SIDE_SELL, size * beta),
+            ]
         elif signal.direction == DIRECTION_SHORT_SPREAD:
-            if size > 0:
-                orders = [
-                    (signal.symbol_a, SIDE_SELL, size),
-                    (signal.symbol_b, SIDE_BUY, size * beta),
-                ]
+            orders = [
+                (signal.symbol_a, SIDE_SELL, size),
+                (signal.symbol_b, SIDE_BUY, size * beta),
+            ]
         elif signal.direction == DIRECTION_FLAT:
             qty_a = self._positions.get(signal.symbol_a, 0.0)
             qty_b = self._positions.get(signal.symbol_b, 0.0)
@@ -199,6 +204,17 @@ class Portfolio:
     def record_equity_snapshot(self, ts: datetime, bar_data: Optional[Dict[str, BarData]] = None) -> None:
         """Append one equity snapshot (e.g. after each bar)."""
         self._append_equity(ts, bar_data)
+
+    def current_equity(self, bar_data: Optional[Dict[str, BarData]] = None) -> float:
+        """Current equity (cash + positions at bar closes). For size_provider when generating signals."""
+        positions_value = 0.0
+        if bar_data:
+            for sym, qty in self._positions.items():
+                if qty == 0:
+                    continue
+                p = _get_close(bar_data, sym)
+                positions_value += qty * p
+        return self._cash + positions_value
 
     def flush_equity_curve(self, engine: Engine) -> None:
         """Batch insert equity curve into backtest_equity (3.4.5)."""

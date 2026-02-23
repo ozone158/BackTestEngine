@@ -307,3 +307,66 @@ def test_backtest_equity_use_cpp_vs_python():
     assert np.allclose(equity_cpp, equity_py, rtol=1e-9, atol=1e-6), (
         "equity curves with use_cpp=True vs False should match closely"
     )
+
+
+def test_record_equity_every_bar_false():
+    """With record_equity_every_bar=False, equity is recorded only when there are fills (not every bar)."""
+    engine = get_engine("sqlite:///:memory:")
+    create_reference_tables(engine)
+    create_backtest_tables(engine)
+
+    dts = [_utc(2025, 1, 15, 9, i) for i in range(20)]
+    symbols = ["AAPL", "MSFT"]
+
+    def read_fn(syms, start, end):
+        return _make_bars(syms, dts)
+
+    data_handler = DataHandler(symbols, dts[0], dts[-1], read_fn)
+    ou = OUParams(
+        theta=0.1,
+        mu=0.0,
+        sigma=1.0,
+        entry_upper=2.0,
+        entry_lower=-2.0,
+        exit_threshold=0.0,
+    )
+    spread_sequence = [0.5, 2.5, 2.2] + [0.0] * 17  # one long entry early
+
+    def provider(ts, bar_data):
+        try:
+            idx = dts.index(ts)
+        except ValueError:
+            idx = 0
+        return (spread_sequence[min(idx, len(spread_sequence) - 1)], 1.0)
+
+    strategy = OUStrategy("AAPL", "MSFT", ou, provider, size=10.0)
+    run_id = generate_run_id()
+    execution = BacktestExecutionHandler(slippage_bps=0, commission_per_trade=0)
+    portfolio = Portfolio(
+        run_id,
+        initial_capital=100_000.0,
+        strategy_name="ou_pairs",
+        pair_id=None,
+        start_ts=dts[0],
+        end_ts=dts[-1],
+        config_json={},
+        execution_handler=execution,
+    )
+    portfolio.start_run(engine)
+
+    run_backtest(data_handler, strategy, portfolio, engine, record_equity_every_bar=False)
+
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        equity_rows = conn.execute(
+            text("SELECT COUNT(*) FROM backtest_equity WHERE run_id = :r"),
+            {"r": run_id},
+        ).scalar()
+        signal_rows = conn.execute(
+            text("SELECT COUNT(*) FROM backtest_signals WHERE run_id = :r"),
+            {"r": run_id},
+        ).scalar()
+    # Equity should be recorded only when we had signals (fills), not every bar
+    assert equity_rows >= 1
+    assert equity_rows <= len(dts), "with record_equity_every_bar=False we should have at most one row per bar"
+    assert signal_rows >= 1

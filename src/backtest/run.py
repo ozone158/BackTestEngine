@@ -4,23 +4,29 @@ Step 3.6 — Event loop and persistence.
 Main loop: DataHandler next bar → Strategy (MarketEvent → SignalEvent) → Portfolio
 (process_signal → ExecutionHandler → FillEvents) → persist signals and fills;
 record equity (per bar or per fill); flush equity curve to backtest_equity.
+
+Uses EventQueue: DataHandler emits MarketEvent on next_bar(event_queue); Strategy and
+Portfolio optionally put SignalEvent/FillEvent on the same queue for ordering and observability.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import insert
 from sqlalchemy.engine import Engine
 
-from src.backtest.events import FillEvent, MarketEvent, SignalEvent
+from src.backtest.events import EventQueue, FillEvent, MarketEvent, SignalEvent
 from src.backtest.data_handler import DataHandler
 from src.backtest.metrics_persistence import compute_and_persist_metrics
 from src.backtest.strategy import OUStrategy
 from src.backtest.portfolio import Portfolio
 from src.data.storage.schema import backtest_fills, backtest_signals
+
+logger = logging.getLogger(__name__)
 
 
 def persist_signal(engine: Engine, run_id: str, signal: SignalEvent) -> Optional[int]:
@@ -77,39 +83,51 @@ def run_backtest(
     engine: Engine,
     *,
     record_equity_every_bar: bool = True,
+    event_queue: Optional[EventQueue] = None,
 ) -> str:
     """
     Run the event-driven backtest loop (3.6.1).
 
     1. Portfolio.start_run(engine) already called by caller (with run_id, start_ts, end_ts).
-    2. While DataHandler has next bar: get next bar; build MarketEvent; Strategy processes it;
-       if SignalEvent: persist signal, Portfolio.process_signal (→ fills), persist each fill;
-       record equity snapshot (every bar or only when fills).
+    2. While DataHandler has next bar: get next bar; DataHandler emits MarketEvent to event_queue
+       when provided; Strategy processes bar (with current_equity for size_provider); if SignalEvent:
+       persist signal, Portfolio.process_signal (→ fills), persist each fill; record equity
+       (every bar or only when fills).
     3. Flush equity curve to backtest_equity.
 
     Returns run_id. Caller must have called portfolio.start_run(engine) before this.
     """
     run_id = portfolio.run_id
     symbols = data_handler.symbols
+    queue = event_queue if event_queue is not None else EventQueue(enforce_time_order=True)
+    bar_count = 0
+    signal_count = 0
 
     while data_handler.has_next():
-        bar = data_handler.next_bar()
+        bar = data_handler.next_bar(event_queue=queue)
         if bar is None:
             break
         dt, bar_data = bar
+        bar_count += 1
         market_ev = MarketEvent(timestamp=dt, symbols=symbols, bar_data=bar_data)
-        signal = strategy.process_market_event(market_ev)
+        current_equity = portfolio.current_equity(bar_data)
+        signal = strategy.process_market_event(market_ev, event_queue=queue, current_equity=current_equity)
 
         if signal is not None:
+            signal_count += 1
             signal_id = persist_signal(engine, run_id, signal)
-            fills = portfolio.process_signal(signal, bar_data)
+            fills = portfolio.process_signal(signal, bar_data, event_queue=queue)
             for fill in fills:
                 persist_fill(engine, run_id, fill, signal_id=signal_id)
         elif record_equity_every_bar:
-            # When no signal this bar, record equity so we have one row per bar
             portfolio.record_equity_snapshot(dt, bar_data)
 
+    logger.info(
+        "run_backtest complete run_id=%s bars=%s signals=%s",
+        run_id[:8] + "..." if len(run_id) > 8 else run_id,
+        bar_count,
+        signal_count,
+    )
     portfolio.flush_equity_curve(engine)
-    # 5.4.1–5.4.4: After run, compute metrics and persist to backtest_metrics
     compute_and_persist_metrics(engine, run_id)
     return run_id
