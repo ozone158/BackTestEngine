@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61", "pybind11"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "backtest-engine"
+version = "0.1.0"
+description = "Event-driven backtesting engine with Kalman/OU pairs strategy"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24",
+    "polars>=0.20",
+    "pandas>=2.0",
+    "sqlalchemy>=2.0,<3",
+    "scipy>=1.10",
+    "statsmodels>=0.14",
+    "requests>=2.28",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21"]
+dashboard = ["streamlit>=1.28"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.setuptools.package-dir]
+"" = "."
+
+# C++ extension is built via setup.py (ext_modules) when present
+# Run: pip install -e .  (builds kalman_core from cpp/kalman_filter.cpp)

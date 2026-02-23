@@ -98,6 +98,122 @@ def test_kalman_hedge_ratio_update():
     assert abs(spreads[-1] - (close_a[-1] - betas[-1] * close_b[-1])) < 1e-6
 
 
+def test_kalman_cpp_vs_python_same_sequence():
+    """Step 4.1.7: Same (price_a, price_b) sequence in C++ and Python; allclose(beta, spread)."""
+    try:
+        import kalman_core  # noqa: F401
+    except ImportError:
+        pytest.skip("kalman_core not built (need C++ compiler and pybind11)")
+
+    Q = 1e-6
+    R = 1e-4
+    np.random.seed(47)
+    n = 40
+    close_b = np.cumsum(np.random.randn(n) * 0.01) + 100.0
+    close_a = 1.3 * close_b + np.random.randn(n) * 0.05
+
+    py_kf = KalmanHedgeRatio(process_noise=Q, measurement_noise=R)
+    cpp_kf = kalman_core.KalmanFilter(Q, R)
+
+    tol = 1e-10
+    for i in range(n):
+        pa, pb = float(close_a[i]), float(close_b[i])
+        beta_py, spread_py = py_kf.update(pa, pb)
+        beta_cpp, spread_cpp = cpp_kf.update(pa, pb)
+        assert np.allclose(beta_cpp, beta_py, rtol=0, atol=tol), (
+            f"step {i}: beta cpp={beta_cpp} py={beta_py}"
+        )
+        assert np.allclose(spread_cpp, spread_py, rtol=0, atol=tol), (
+            f"step {i}: spread cpp={spread_cpp} py={spread_py}"
+        )
+
+
+def test_run_kalman_on_aligned_use_cpp_matches_python():
+    """Step 4.2.5: run_kalman_on_aligned with use_cpp=True matches use_cpp=False (spread/beta within tolerance)."""
+    from src.data.alpha.kalman import _CPP_AVAILABLE
+
+    if not _CPP_AVAILABLE:
+        pytest.skip("kalman_core not built")
+
+    np.random.seed(48)
+    n = 60
+    close_b = np.cumsum(np.random.randn(n) * 0.01) + 100.0
+    close_a = 1.2 * close_b + np.random.randn(n) * 0.08
+    aligned = _make_aligned_df(close_a, close_b, n)
+
+    df_py, _ = run_kalman_on_aligned(aligned, warm_up=15, use_cpp=False)
+    df_cpp, _ = run_kalman_on_aligned(aligned, warm_up=15, use_cpp=True)
+
+    assert len(df_py) == len(df_cpp)
+    tol = 1e-9
+    assert np.allclose(df_cpp["spread"], df_py["spread"], rtol=0, atol=tol, equal_nan=True)
+    assert np.allclose(df_cpp["beta"], df_py["beta"], rtol=0, atol=tol, equal_nan=True)
+
+
+def test_run_pair_kalman_use_cpp_matches_python(tmp_path):
+    """Step 4.2.5: run_pair_kalman with use_cpp=True matches use_cpp=False."""
+    from src.data.alpha.kalman import _CPP_AVAILABLE
+    from src.data.storage import get_engine, write_bars
+
+    if not _CPP_AVAILABLE:
+        pytest.skip("kalman_core not built")
+
+    n = 70
+    dts = pd.date_range("2020-01-01", periods=n, freq="B", tz=timezone.utc)
+    np.random.seed(49)
+    close_b = np.cumsum(np.random.randn(n) * 0.01) + 100
+    close_a = 1.1 * close_b + np.random.randn(n) * 0.1
+    a, b = "SYM_A", "SYM_B"
+    bars_a = pd.DataFrame({
+        "symbol": [a] * n,
+        "datetime": dts,
+        "open": close_a - 0.1, "high": close_a + 0.1, "low": close_a - 0.1, "close": close_a,
+        "volume": 1e6, "adj_factor": 1.0, "outlier_flag": 0,
+    })
+    bars_b = pd.DataFrame({
+        "symbol": [b] * n,
+        "datetime": dts,
+        "open": close_b - 0.1, "high": close_b + 0.1, "low": close_b - 0.1, "close": close_b,
+        "volume": 1e6, "adj_factor": 1.0, "outlier_flag": 0,
+    })
+    bars = pd.concat([bars_a, bars_b], ignore_index=True)
+    for part_date, grp in bars.groupby(bars["datetime"].dt.date):
+        part_key = {"source": "csv", "date": part_date.isoformat()}
+        write_bars(tmp_path, part_key, grp)
+
+    start = dts[0].to_pydatetime()
+    end = dts[-1].to_pydatetime()
+
+    df_py = run_pair_kalman(
+        tmp_path, a, b, start, end,
+        write_parquet=False, min_obs=60, use_cpp=False,
+    )
+    df_cpp = run_pair_kalman(
+        tmp_path, a, b, start, end,
+        write_parquet=False, min_obs=60, use_cpp=True,
+    )
+    assert df_py is not None and df_cpp is not None
+    assert len(df_py) == len(df_cpp)
+    tol = 1e-9
+    assert np.allclose(df_cpp["spread"], df_py["spread"], rtol=0, atol=tol, equal_nan=True)
+    assert np.allclose(df_cpp["beta"], df_py["beta"], rtol=0, atol=tol, equal_nan=True)
+
+
+def test_kalman_use_cpp_rejects_non_finite():
+    """Step 4.2.4: C++ path raises clear exception for non-finite inputs."""
+    from src.data.alpha.kalman import _CPP_AVAILABLE
+
+    if not _CPP_AVAILABLE:
+        pytest.skip("kalman_core not built")
+
+    kf = KalmanHedgeRatio(1e-6, 1e-4, use_cpp=True)
+    kf.update(100.0, 80.0)
+    with pytest.raises(ValueError, match="must be finite"):
+        kf.update(float("nan"), 80.0)
+    with pytest.raises(ValueError, match="must be finite"):
+        kf.update(100.0, float("inf"))
+
+
 def test_persist_and_load_kalman_params(tmp_path):
     """Persist Kalman params and load back (round-trip)."""
     from src.data.storage.schema import create_reference_tables, create_alpha_tables, get_engine

@@ -121,3 +121,127 @@ python -m scripts.validate_e2e --symbols AAPL MSFT --days 7 --root data --skip-i
 - “Validation complete. Data is ready for Module 2 and 3.”
 
 Exit code 0 if all pass; 1 on failure.
+
+---
+
+## benchmark_kalman (Step 4.3)
+
+Compares wall-clock time: same backtest (or Kalman-only loop) with Python vs C++ Kalman. Logs ratio `time_Python / time_C++` (4.3.3). Optional: fail if C++ is not faster (regression).
+
+**Usage**
+
+```bash
+set PYTHONPATH=e:\Project\BackTestEngine
+# Default: 252 bars, 20 iterations, full backtest
+python -m scripts.benchmark_kalman
+
+# One year daily, 30 runs
+python -m scripts.benchmark_kalman --bars 252 --iterations 30
+
+# Per-step cost only (no Strategy/Portfolio)
+python -m scripts.benchmark_kalman --mode kalman_only --bars 5000 --iterations 10
+
+# CI: exit 1 if C++ is slower than Python
+python -m scripts.benchmark_kalman --fail-on-regression
+```
+
+**Options**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--bars` | 252 | Number of bars (e.g. 252 = 1 year daily) |
+| `--iterations` | 20 | Runs per implementation |
+| `--mode` | backtest | `backtest` = full backtest; `kalman_only` = tight Kalman update loop (4.3.2) |
+| `--fail-on-regression` | off | Exit 1 if C++ is not faster than Python |
+
+**Expected output**
+
+- Mode, bars, iterations.
+- Python total time and per-run (or per-step) time.
+- C++ total time and ratio (Python/C++). If ratio &lt; 1, note that I/O/Portfolio may dominate.
+- If `kalman_core` is not built, only Python timings are printed.
+
+---
+
+## Execution C++ (Step 4.4)
+
+Fill simulation can use a C++ extension for throughput. Build with `pip install -e .` (requires pybind11 and a C++17 compiler). This builds both `kalman_core` and `execution_core`. Then use `BacktestExecutionHandler(..., use_cpp=True)` in your backtest; when `execution_core` is available, fill price and commission are computed in C++. Same results as Python; tests in `tests/test_execution.py` (`test_use_cpp_matches_python`) verify. If the extension is not built, `use_cpp=True` falls back to Python.
+
+---
+
+## compute_metrics (Step 5.4.4 Option B)
+
+Recompute and persist backtest metrics for a run without re-running the backtest. Reads `backtest_equity` and `backtest_fills`, runs PerformanceMetrics (and optionally RiskAttribution if benchmark provided), writes/updates `backtest_metrics`.
+
+**Usage**
+
+```bash
+set PYTHONPATH=e:\Project\BackTestEngine
+python -m scripts.compute_metrics --run-id <run_id> [--db URL]
+python -m scripts.compute_metrics --run-id <run_id> --benchmark returns.csv
+```
+
+**Options**
+
+| Option | Description |
+|--------|-------------|
+| `--run-id` | (Required) backtest run_id |
+| `--db` | Database URL (default: from env or sqlite) |
+| `--benchmark` | Path to benchmark returns (CSV one column or .npy) for alpha/beta |
+| `--periods-per-year` | 252 (default) for annualization |
+
+---
+
+## report_backtest (Step 5.5)
+
+Lists recent backtest runs and their metrics (Sharpe, Sortino, max drawdown, total return, alpha, beta, etc.). Reads from **backtest_runs** and **backtest_metrics** (left join so runs without metrics still appear).
+
+**Usage**
+
+```bash
+set PYTHONPATH=e:\Project\BackTestEngine
+# Console table (default), last 10 runs
+python -m scripts.report_backtest
+
+# CSV to stdout or file
+python -m scripts.report_backtest --limit 10 --output csv
+python -m scripts.report_backtest --output csv --out-file report.csv
+
+# HTML table
+python -m scripts.report_backtest --output html --out-file report.html
+```
+
+**Options**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--limit` | 10 | Max number of runs to list (ordered by created_at desc) |
+| `--output` | console | `console`, `csv`, or `html` |
+| `--db` | (default SQLite) | Database URL |
+| `--out-file` | (none) | Write output to file (csv/html); default stdout |
+
+---
+
+## dashboard (Step 5.5.2)
+
+Streamlit dashboard: table of recent backtest runs with key metrics; select a run to view its equity curve chart.
+
+**Requirements**
+
+- `pip install -e ".[dashboard]"` (adds Streamlit), or `pip install streamlit`
+- Set `PYTHONPATH` to project root so `scripts` and `src` are importable
+
+**Usage**
+
+```bash
+set PYTHONPATH=e:\Project\BackTestEngine
+streamlit run scripts/dashboard.py
+```
+
+To use a specific database:
+
+```bash
+streamlit run scripts/dashboard.py -- --db sqlite:///data/backtest.db
+```
+
+Use the sidebar to change "Max runs". Click a run in the dropdown to see its equity curve.
